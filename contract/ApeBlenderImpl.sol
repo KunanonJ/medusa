@@ -5,7 +5,7 @@ pragma experimental ABIEncoderV2;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
 import "@openzeppelin/contracts/math/SafeMath.sol";
-import "@openzeppelin/contracts/proxy/Initializable.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
 import "@uniswap/lib/contracts/libraries/TransferHelper.sol";
 
 import "./interfaces/IUniswapV2Router02.sol";
@@ -14,7 +14,7 @@ import "./interfaces/IUniswapV2Factory.sol";
 import "./interfaces/IWETH.sol";
 import "./uniswap/Math.sol";
 
-contract ApeBlender is Initializable {
+contract ApeBlenderImpl is Ownable {
     using SafeMath for uint256;
     using SafeERC20 for IERC20;
 
@@ -26,14 +26,14 @@ contract ApeBlender is Initializable {
     uint256 public exchangeSwapFeeDenominator; // 1000 for Uniswap, 10000 for Pancakeswap
     uint256 MAX;
 
-    function initialize(
+    constructor(
         uint256 _apeFeeBps,
         address payable _feeTreasury,
         address _exchangeRouter,
         address _wNative,
         uint256 _exchangeSwapFeeNumerator,
         uint256 _exchangeSwapFeeDenominator
-    ) public payable initializer {
+    ) public {
         apeFeeBps = _apeFeeBps;
         feeTreasury = _feeTreasury;
         exchangeRouter = IUniswapV2Router02(_exchangeRouter);
@@ -267,13 +267,13 @@ contract ApeBlender is Initializable {
                     MAX
                 );
                 uint256[] memory amountOuts = exchangeRouter
-                .swapExactTokensForTokens(
-                    inputTokens[i].amount,
-                    0,
-                    inputTokens[i].tokenToNativePath,
-                    address(this),
-                    now + 60
-                );
+                    .swapExactTokensForTokens(
+                        inputTokens[i].amount,
+                        0,
+                        inputTokens[i].tokenToNativePath,
+                        address(this),
+                        now + 60
+                    );
                 totalNative = totalNative.add(
                     amountOuts[amountOuts.length - 1]
                 );
@@ -300,13 +300,13 @@ contract ApeBlender is Initializable {
                     MAX
                 );
                 uint256[] memory amountOuts = exchangeRouter
-                .swapExactTokensForTokens(
-                    inputTokens[i].amount,
-                    0,
-                    inputTokens[i].tokenToNativePath,
-                    address(this),
-                    now + 60
-                );
+                    .swapExactTokensForTokens(
+                        inputTokens[i].amount,
+                        0,
+                        inputTokens[i].tokenToNativePath,
+                        address(this),
+                        now + 60
+                    );
                 totalNative = totalNative.add(
                     amountOuts[amountOuts.length - 1]
                 );
@@ -346,26 +346,26 @@ contract ApeBlender is Initializable {
             uint256 token0Amount,
             uint256 token1Amount
         ) = _optimalSwapForAddingLiquidity(
-            outputLP,
-            token0,
-            token1,
-            amount0,
-            amount1
-        );
+                outputLP,
+                token0,
+                token1,
+                amount0,
+                amount1
+            );
         (
             uint256 addedToken0,
             uint256 addedToken1,
             uint256 lpAmount
         ) = exchangeRouter.addLiquidity(
-            token0,
-            token1,
-            token0Amount,
-            token1Amount,
-            0,
-            0,
-            address(this),
-            now + 60
-        );
+                token0,
+                token1,
+                token0Amount,
+                token1Amount,
+                0,
+                0,
+                address(this),
+                now + 60
+            );
 
         // Transfer dust
         if (token0Amount.sub(addedToken0) > 0) {
@@ -412,13 +412,13 @@ contract ApeBlender is Initializable {
         (path[0], path[1]) = reverse ? (token1, token0) : (token0, token1);
         if (optimalSwapAmount > 0) {
             uint256[] memory amountOuts = exchangeRouter
-            .swapExactTokensForTokens(
-                optimalSwapAmount,
-                0,
-                path,
-                address(this),
-                now + 60
-            );
+                .swapExactTokensForTokens(
+                    optimalSwapAmount,
+                    0,
+                    path,
+                    address(this),
+                    now + 60
+                );
             if (reverse) {
                 token0Amount = token0Amount.add(
                     amountOuts[amountOuts.length - 1]
@@ -559,7 +559,7 @@ contract ApeBlender is Initializable {
                 swapPath[1] = token1;
             }
             uint256[] memory optimalSwapAmountOuts = exchangeRouter
-            .getAmountsOut(swapAmount, swapPath);
+                .getAmountsOut(swapAmount, swapPath);
             uint256 optimalSwapAmountOut = optimalSwapAmountOuts[
                 optimalSwapAmountOuts.length - 1
             ];
@@ -588,5 +588,23 @@ contract ApeBlender is Initializable {
         // STEP 4: Calculate fee
         uint256 fee = apeFeeBps.mul(output).div(10000);
         return output.sub(fee);
+    }
+
+    function setApeFeeBps(uint256 _apeFeeBps) public onlyOwner {
+        apeFeeBps = _apeFeeBps;
+    }
+
+    function setFeeTreasury(address _feeTreasury) public onlyOwner {
+        feeTreasury = payable(_feeTreasury);
+    }
+
+    function setExchange(
+        address router,
+        uint256 _exchangeSwapFeeNumerator,
+        uint256 _exchangeSwapFeeDenominator
+    ) public onlyOwner {
+        exchangeRouter = IUniswapV2Router02(router);
+        exchangeSwapFeeNumerator = _exchangeSwapFeeNumerator;
+        exchangeSwapFeeDenominator = _exchangeSwapFeeDenominator;
     }
 }

@@ -6,7 +6,6 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
 import "@openzeppelin/contracts/math/SafeMath.sol";
 import "@openzeppelin/contracts/proxy/Initializable.sol";
-import "@uniswap/lib/contracts/libraries/TransferHelper.sol";
 
 import "./interfaces/IUniswapV2Router02.sol";
 import "./interfaces/IUniswapV2Pair.sol";
@@ -14,7 +13,7 @@ import "./interfaces/IUniswapV2Factory.sol";
 import "./interfaces/IWETH.sol";
 import "./uniswap/Math.sol";
 
-contract ApeBlender is Initializable {
+contract ApeBlenderProxyTest is Initializable {
     using SafeMath for uint256;
     using SafeERC20 for IERC20;
 
@@ -24,6 +23,7 @@ contract ApeBlender is Initializable {
     IUniswapV2Router02 public exchangeRouter;
     uint256 public exchangeSwapFeeNumerator; // 3 for Uniswap, 25 for Pancakeswap
     uint256 public exchangeSwapFeeDenominator; // 1000 for Uniswap, 10000 for Pancakeswap
+
     uint256 MAX;
 
     function initialize(
@@ -41,6 +41,10 @@ contract ApeBlender is Initializable {
         exchangeSwapFeeNumerator = _exchangeSwapFeeNumerator;
         exchangeSwapFeeDenominator = _exchangeSwapFeeDenominator;
         MAX = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff;
+    }
+
+    function setApeFeeBps(uint256 _apeFeeBps) public {
+        apeFeeBps = _apeFeeBps;
     }
 
     receive() external payable {}
@@ -66,7 +70,9 @@ contract ApeBlender is Initializable {
             return amount;
         }
         uint256 fee = apeFeeBps.mul(amount).div(10000);
-        TransferHelper.safeTransferETH(feeTreasury, fee);
+        //https://ethereum.stackexchange.com/questions/19341/address-send-vs-address-transfer-best-practice-usage/74007#74007
+        (bool success, ) = feeTreasury.call{value: fee}("");
+        require(success, "Transfer failed.");
         return amount.sub(fee);
     }
 
@@ -78,32 +84,8 @@ contract ApeBlender is Initializable {
             return amount;
         }
         uint256 fee = apeFeeBps.mul(amount).div(10000);
-        IERC20(token).safeTransfer(feeTreasury, fee);
+        IERC20(token).transfer(feeTreasury, fee);
         return amount.sub(fee);
-    }
-
-    function swapTokensToNative(
-        InputToken[] memory inputTokens,
-        InputLP[] memory inputLPs,
-        uint256 minOutputAmount
-    ) public payable {
-        if (inputLPs.length > 0) {
-            _transferTokensToApe(inputLPs);
-            _swapTokensForWNative(_removeLiquidity(inputLPs));
-        }
-        if (inputTokens.length > 0) {
-            _transferTokensToApe(inputTokens);
-            _swapTokensForWNative(inputTokens);
-        }
-        uint256 wNativeBalance = wNative.balanceOf(address(this));
-        wNative.withdraw(wNativeBalance);
-        uint256 amountOut = wNativeBalance.add(msg.value);
-        amountOut = transferNativeFeeToTreasury(amountOut);
-        require(
-            amountOut >= minOutputAmount,
-            "Expect amountOut to be greater than minOutputAmount."
-        );
-        TransferHelper.safeTransferETH(msg.sender, amountOut);
     }
 
     function swapTokensToToken(
@@ -117,14 +99,16 @@ contract ApeBlender is Initializable {
         }
         if (inputLPs.length > 0) {
             _transferTokensToApe(inputLPs);
-            _swapTokensForWNative(_removeLiquidity(inputLPs));
+            _swapTokensForNative(_removeLiquidity(inputLPs));
         }
         if (inputTokens.length > 0) {
             _transferTokensToApe(inputTokens);
-            _swapTokensForWNative(inputTokens);
+            _swapTokensForNative(inputTokens);
         }
-        uint256 wNativeBalance = wNative.balanceOf(address(this));
-        uint256 amountOut = _swapWNativeForToken(
+        uint256 wNativeBalance = IERC20(address(wNative)).balanceOf(
+            address(this)
+        );
+        uint256 amountOut = _swapNativeForToken(
             wNativeBalance,
             nativeToOutputPath
         );
@@ -145,8 +129,6 @@ contract ApeBlender is Initializable {
     function swapTokensToLP(
         InputToken[] memory inputTokens,
         InputLP[] memory inputLPs,
-        address[] memory nativeToToken0Path,
-        address[] memory nativeToToken1Path,
         address outputLP,
         uint256 minOutputAmount
     ) public payable {
@@ -157,7 +139,7 @@ contract ApeBlender is Initializable {
         }
         if (inputLPs.length > 0) {
             _transferTokensToApe(inputLPs);
-            _swapTokensForWNativeExcept(
+            _swapTokensForNativeExcept(
                 _removeLiquidity(inputLPs),
                 token0,
                 token1
@@ -165,14 +147,8 @@ contract ApeBlender is Initializable {
         }
         if (inputTokens.length > 0) {
             _transferTokensToApe(inputTokens);
-            _swapTokensForWNativeExcept(inputTokens, token0, token1);
+            _swapTokensForNativeExcept(inputTokens, token0, token1);
         }
-        uint256 wNativeBalance = wNative.balanceOf(address(this));
-        _swapWNativeForToken(wNativeBalance.div(2), nativeToToken0Path);
-        _swapWNativeForToken(
-            wNativeBalance.sub(wNativeBalance.div(2)),
-            nativeToToken1Path
-        );
         uint256 amountOut = _optimalSwapToLp(
             outputLP,
             token0,
@@ -254,7 +230,7 @@ contract ApeBlender is Initializable {
         return outputTokens;
     }
 
-    function _swapTokensForWNative(InputToken[] memory inputTokens)
+    function _swapTokensForNative(InputToken[] memory inputTokens)
         private
         returns (uint256)
     {
@@ -282,18 +258,15 @@ contract ApeBlender is Initializable {
         return totalNative;
     }
 
-    function _swapTokensForWNativeExcept(
+    function _swapTokensForNativeExcept(
         InputToken[] memory inputTokens,
         address token0,
         address token1
     ) private returns (uint256) {
         uint256 totalNative = 0;
         for (uint256 i = 0; i < inputTokens.length; i++) {
-            // Skip token0, token1 and wNative
             if (
-                inputTokens[i].token != token0 &&
-                inputTokens[i].token != token1 &&
-                inputTokens[i].token != address(wNative)
+                inputTokens[i].token != token0 && inputTokens[i].token != token1
             ) {
                 IERC20(inputTokens[i].token).approve(
                     address(exchangeRouter),
@@ -315,14 +288,15 @@ contract ApeBlender is Initializable {
         return totalNative;
     }
 
-    function _swapWNativeForToken(uint256 amount, address[] memory path)
+    function _swapNativeForToken(uint256 amount, address[] memory path)
         private
         returns (uint256)
     {
-        if (amount == 0 || path[path.length - 1] == address(wNative)) {
-            return amount;
-        }
-        wNative.approve(address(exchangeRouter), MAX);
+        // if (path.length == 1 && path[0] == address(wNative)) {
+        //     wNative.deposit{value: amount}();
+        //     return amount;
+        // }
+        IERC20(address(wNative)).approve(address(exchangeRouter), MAX);
         uint256[] memory amountOuts = exchangeRouter.swapExactTokensForTokens(
             amount,
             0,
@@ -447,146 +421,19 @@ contract ApeBlender is Initializable {
         );
 
         uint256 a = exchangeSwapFeeDenominator.sub(exchangeSwapFeeNumerator);
-        uint256 b = uint256(
-            exchangeSwapFeeDenominator.mul(2).sub(exchangeSwapFeeNumerator)
-        ).mul(resA);
-        uint256 _c = (amtA.mul(resB)).sub(amtB.mul(resA));
-        uint256 c = _c.mul(exchangeSwapFeeDenominator).div(amtB.add(resB)).mul(
-            resA
+        uint256 b = exchangeSwapFeeDenominator
+        .mul(2)
+        .sub(exchangeSwapFeeNumerator)
+        .mul(resA);
+
+        uint256 c = a.mul(amtA).mul(resA).mul(exchangeSwapFeeDenominator).mul(
+            4
         );
+        uint256 d = Math.sqrt(b.mul(b).add(c));
 
-        uint256 d = a.mul(c).mul(4);
-        uint256 e = Math.sqrt(b.mul(b).add(d));
-
-        uint256 numerator = e.sub(b);
+        uint256 numerator = d.sub(b);
         uint256 denominator = a.mul(2);
 
         return numerator.div(denominator);
-    }
-
-    function getWNativeToTokenAmount(
-        uint256 wNativeAmount,
-        address[] memory nativeToOutputPath
-    ) public view returns (uint256) {
-        if (wNativeAmount == 0) {
-            return 0;
-        }
-        if (
-            nativeToOutputPath[nativeToOutputPath.length - 1] ==
-            address(wNative)
-        ) {
-            uint256 output = wNativeAmount;
-            uint256 fee = apeFeeBps.mul(output).div(10000);
-            return output.sub(fee);
-        }
-        uint256[] memory amountOuts = exchangeRouter.getAmountsOut(
-            wNativeAmount,
-            nativeToOutputPath
-        );
-        uint256 output = amountOuts[amountOuts.length - 1];
-        uint256 fee = apeFeeBps.mul(output).div(10000);
-        return output.sub(fee);
-    }
-
-    function getWNativeToLpAmount(
-        uint256 wNativeAmount,
-        address[] memory nativeToToken0Path,
-        address[] memory nativeToToken1Path
-    ) public view returns (uint256) {
-        if (wNativeAmount == 0) {
-            return 0;
-        }
-        address token0 = nativeToToken0Path[nativeToToken0Path.length - 1];
-        address token1 = nativeToToken1Path[nativeToToken1Path.length - 1];
-        address lp = IUniswapV2Factory(exchangeRouter.factory()).getPair(
-            token0,
-            token1
-        );
-        uint256 token0Amount;
-        uint256 token1Amount;
-
-        // STEP 1: Swap wNative to token0 and token1
-        if (
-            nativeToToken0Path[nativeToToken0Path.length - 1] ==
-            address(wNative)
-        ) {
-            token0Amount = wNativeAmount.div(2);
-        } else {
-            uint256[] memory amountOuts0 = exchangeRouter.getAmountsOut(
-                wNativeAmount.div(2),
-                nativeToToken0Path
-            );
-            token0Amount = amountOuts0[amountOuts0.length - 1];
-        }
-
-        if (
-            nativeToToken1Path[nativeToToken1Path.length - 1] ==
-            address(wNative)
-        ) {
-            token1Amount = wNativeAmount.div(2);
-        } else {
-            uint256[] memory amountOuts1 = exchangeRouter.getAmountsOut(
-                wNativeAmount.div(2),
-                nativeToToken1Path
-            );
-            token1Amount = amountOuts1[amountOuts1.length - 1];
-        }
-
-        // STEP 2: Optimal swap for adding liquidity
-        (uint256 res0, uint256 res1, ) = IUniswapV2Pair(lp).getReserves();
-        if (res0.mul(token1Amount) != res1.mul(token0Amount)) {
-            bool reverse = token0Amount.mul(res1) < token1Amount.mul(res0);
-            uint256 swapAmount = reverse
-                ? calculateOptimalSwapAmount(
-                    token1Amount,
-                    token0Amount,
-                    res1,
-                    res0
-                )
-                : calculateOptimalSwapAmount(
-                    token0Amount,
-                    token1Amount,
-                    res0,
-                    res1
-                );
-
-            address[] memory swapPath = new address[](2);
-            if (reverse) {
-                swapPath[0] = token1;
-                swapPath[1] = token0;
-            } else {
-                swapPath[0] = token0;
-                swapPath[1] = token1;
-            }
-            uint256[] memory optimalSwapAmountOuts = exchangeRouter
-            .getAmountsOut(swapAmount, swapPath);
-            uint256 optimalSwapAmountOut = optimalSwapAmountOuts[
-                optimalSwapAmountOuts.length - 1
-            ];
-            if (reverse) {
-                token0Amount = token0Amount.add(optimalSwapAmountOut);
-                token1Amount = token1Amount.sub(swapAmount);
-                res0 = res0.sub(optimalSwapAmountOut);
-                res1 = res1.add(swapAmount);
-            } else {
-                token0Amount = token0Amount.sub(swapAmount);
-                token1Amount = token1Amount.add(optimalSwapAmountOut);
-                res0 = res0.add(swapAmount);
-                res1 = res1.sub(optimalSwapAmountOut);
-            }
-        }
-
-        // STEP 3: Calculate lp token output
-        uint256 totalSupply = IUniswapV2Pair(lp).totalSupply();
-        uint256 outputOptimal0 = token0Amount.mul(totalSupply).div(res0);
-        uint256 outputOptimal1 = token1Amount.mul(totalSupply).div(res1);
-
-        uint256 output = outputOptimal0 > outputOptimal1
-            ? outputOptimal1
-            : outputOptimal0;
-
-        // STEP 4: Calculate fee
-        uint256 fee = apeFeeBps.mul(output).div(10000);
-        return output.sub(fee);
     }
 }
